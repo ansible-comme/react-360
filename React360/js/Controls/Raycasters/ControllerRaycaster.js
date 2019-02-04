@@ -10,7 +10,6 @@
  */
 
 import {rotateByQuaternion} from '../../Utils/Math';
-
 import {type Quaternion, type Vec3} from '../Types';
 import {type Raycaster} from './Types';
 
@@ -18,9 +17,7 @@ const TYPE = 'controller';
 
 // Fallback for browsers that don't support a getGamepads interface
 const getGamepads: () => Array<Gamepad> =
-  typeof navigator.getGamepads === 'function'
-    ? navigator.getGamepads.bind(navigator)
-    : () => [];
+  typeof navigator.getGamepads === 'function' ? navigator.getGamepads.bind(navigator) : () => [];
 
 const armModelVector = [0, 0, -1];
 function basicArmModel(origin: Vec3, orientation: Quaternion, hand: ?string) {
@@ -46,6 +43,7 @@ export default class ControllerRaycaster implements Raycaster {
 
     const initialGamepads = getGamepads();
     // Iterate backwards to pick up the "newest" controller first
+    /* eslint-disable-next-line */
     for (let i = initialGamepads.length; i--; ) {
       this._setGamepadIfValid(initialGamepads[i]);
     }
@@ -61,7 +59,7 @@ export default class ControllerRaycaster implements Raycaster {
   }
 
   _setGamepadIfValid(gamepad: ?Gamepad) {
-    if (!gamepad || this._gamepadID !== null) {
+    if (!gamepad || this._gamepadID != null) {
       return;
     }
     if (gamepad.pose) {
@@ -101,10 +99,43 @@ export default class ControllerRaycaster implements Raycaster {
     return Infinity;
   }
 
+  _isGamepadActive(gamepad: Gamepad) {
+    const buttons = gamepad.buttons;
+    for (let btn = 0; btn < buttons.length; btn++) {
+      const pressed =
+        typeof buttons[btn] === 'object' ? buttons[btn].pressed : buttons[btn] === 1.0;
+      if (pressed) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  _tryUpdateGamepad() {
+    const gamepads = getGamepads();
+    if (this._gamepadIndex > 0 && this._isGamepadActive(gamepads[this._gamepadIndex])) {
+      return;
+    }
+    for (let id = 0; id < gamepads.length; id++) {
+      if (id !== this._gamepadIndex) {
+        const gamepad = gamepads[id];
+        if (gamepad && gamepad.pose && this._isGamepadActive(gamepad)) {
+          this._setGamepad(gamepad);
+          return;
+        }
+      }
+    }
+  }
+
   fillDirection(direction: Vec3): boolean {
     if (!this._enabled) {
       return false;
     }
+    // Try update the active gamepad.
+    // If current gamepad is not active and another gamepad
+    // is active, use the new active gamepad.
+    this._tryUpdateGamepad();
+
     if (!this._gamepadID) {
       return false;
     }

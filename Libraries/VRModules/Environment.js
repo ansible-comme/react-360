@@ -11,11 +11,18 @@
  */
 
 import {EnvironmentModule} from 'NativeModules';
+import processTransform from 'processTransform';
 
 type Resource = string | {uri: string};
 
-export type EnvironmentImageOptions = {
+type RotateTransform = {rotateX: string} | {rotateY: string}
+  | {rotateZ: string} | {rotate: string}
+
+export type EnvironmentOptions = {
   format?: string,
+  transition?: number,
+  fadeLevel?: number,
+  rotateTransform?: Array<RotateTransform>
 };
 
 export function clearBackground() {
@@ -24,17 +31,59 @@ export function clearBackground() {
 
 export function setBackgroundImage(
   url: Resource,
-  options: EnvironmentImageOptions = {},
+  options: EnvironmentOptions = {},
 ) {
   const scene: Object = {
     type: 'photo',
     url: typeof url === 'object' ? url.uri : url,
     stereo: options.format,
+    rotateTransform: options.rotateTransform
+        ? processTransform(options.rotateTransform)
+        : undefined,
   };
-  EnvironmentModule.loadScene(scene);
+  const transition: Object = {
+    transition: options.transition,
+    fadeLevel: options.fadeLevel,
+  }
+  EnvironmentModule.loadScene(scene, transition);
 }
 
-export function setBackgroundVideo(player: string) {
-  const scene = {type: 'video', player};
-  EnvironmentModule.loadScene(scene);
+export function setBackgroundVideo(player: string, options: EnvironmentOptions = {}) {
+  const scene = {
+    type: 'video',
+    player: player,
+    rotateTransform: options.rotateTransform
+        ? processTransform(options.rotateTransform)
+        : undefined,
+  };
+  const transition: Object = {
+    transition: options.transition,
+    fadeLevel: options.fadeLevel,
+  }
+  EnvironmentModule.loadScene(scene, transition);
+}
+
+export function preloadBackgroundImage(url: Resource) {
+  const scene: Object = {
+    type: 'photo',
+    url: typeof url === 'object' ? url.uri : url
+  };
+  EnvironmentModule.preloadScene(scene);
+}
+
+export function animateFade(fadeLevel: number, fadeTime: number) {
+  EnvironmentModule.animateFade(fadeLevel, fadeTime);
+}
+
+export function setScreen(screenId: string, handle: ?string, surfaceId: string, x: number, y: number, width: number, height: number) {
+  EnvironmentModule.setScreen({
+    screenId: screenId,
+    type: 'surface',
+    surface: surfaceId,
+    player: handle,
+    x: x,
+    y: y,
+    width: width,
+    height: height,
+  });
 }

@@ -10,8 +10,11 @@
  */
 
 import * as THREE from 'three';
+import {type Quaternion} from '../Controls/Types';
 
 type ShapeType = 'Cylinder' | 'Flat';
+
+type SurfaceCenterControl = 'yaw' | 'yaw-pitch' | 'all';
 
 export const SurfaceShape: {[key: ShapeType]: ShapeType} = {
   Cylinder: 'Cylinder',
@@ -45,6 +48,7 @@ const DEFAULT_RADIUS = 4;
  * React surface to be dynamically reshaped depending on the contents. Calling
  */
 export default class Surface {
+  rootTag: number;
   _density: number;
   _height: number;
   _pitch: number;
@@ -52,6 +56,7 @@ export default class Surface {
   _shape: ShapeType;
   _width: number;
   _yaw: number;
+  _roll: number;
   // Three.js properties
   _camera: THREE.Camera;
   _geometry: THREE.Geometry;
@@ -60,11 +65,7 @@ export default class Surface {
   _renderTarget: THREE.WebGLRenderTarget;
   _subScene: THREE.Scene;
 
-  constructor(
-    width: number,
-    height: number,
-    shape: ShapeType = SurfaceShape.Cylinder,
-  ) {
+  constructor(width: number, height: number, shape: ShapeType = SurfaceShape.Cylinder) {
     this._width = width;
     this._height = height;
     this._density = DEFAULT_DENSITY;
@@ -72,6 +73,8 @@ export default class Surface {
     this._shape = shape;
     this._yaw = 0;
     this._pitch = 0;
+    this._roll = 0;
+    this.rootTag = -1;
 
     this._material = new THREE.MeshBasicMaterial({
       wireframe: false,
@@ -103,6 +106,7 @@ export default class Surface {
     this._mesh = new THREE.Mesh(this._geometry, this._material);
     (this._mesh: any).subScene = this._subScene;
     (this._mesh: any).subSceneCamera = this._camera;
+    (this._mesh: any).owner = this;
     this._mesh.scale.z = -1;
     this.resize(width, height);
   }
@@ -152,9 +156,36 @@ export default class Surface {
    * x-y plane; the pitch angle moves the panel vertically between the floor
    * and the ceiling.
    */
-  setAngle(yaw: number, pitch: number) {
+  setAngle(yaw: number, pitch: number, roll: number = 0) {
     this._yaw = yaw;
     this._pitch = pitch;
+    this._roll = roll;
+    this._recomputeOrientation();
+  }
+
+  /**
+   * Recenter a Flat panel, positioned on the outside of a sphere.
+   * Given the center control options:
+   *   1. 'yaw': The surface will fit the yaw angle with current camera orientaion
+   *   2. 'yaw-pitch': The surface will fit both the yaw and pitch angle
+   *       with the camera orientation.
+   */
+  recenter(cameraQuat: Quaternion, centerControl: SurfaceCenterControl) {
+    const euler = new THREE.Euler(0, 0, 0).setFromQuaternion(
+      new THREE.Quaternion(cameraQuat[0], cameraQuat[1], cameraQuat[2], cameraQuat[3]),
+      'YXZ'
+    );
+
+    if (centerControl === 'yaw') {
+      this._yaw = -euler.y;
+    } else if (centerControl === 'yaw-pitch') {
+      this._yaw = -euler.y;
+      this._pitch = euler.x;
+    } else {
+      this._yaw = -euler.y;
+      this._pitch = euler.x;
+      this._roll = euler.z;
+    }
     this._recomputeOrientation();
   }
 
@@ -173,6 +204,14 @@ export default class Surface {
    */
   setVisibility(visible: boolean) {
     this._mesh.visible = visible;
+  }
+
+  attachSubNode(subNode: THREE.Object3D) {
+    this._subScene.add(subNode);
+  }
+
+  removeSubNode(subNode: THREE.Object3D) {
+    this._subScene.remove(subNode);
   }
 
   getWidth(): number {
@@ -233,14 +272,14 @@ export default class Surface {
         this._width,
         this._height,
         this._density,
-        this._radius,
+        this._radius
       );
     } else if (this._shape === SurfaceShape.Flat) {
       this._geometry = Surface.createFlatGeometry(
         this._width,
         this._height,
         this._density,
-        this._radius,
+        this._radius
       );
     }
     if (this._mesh) {
@@ -273,7 +312,14 @@ export default class Surface {
       const cp = Math.cos(this._pitch / 2);
       const sy = Math.sin(-this._yaw / 2);
       const cy = Math.cos(-this._yaw / 2);
-      this._mesh.quaternion.set(cy * sp, sy * cp, -sy * sp, cy * cp);
+      const sr = Math.sin(this._roll / 2);
+      const cr = Math.cos(this._roll / 2);
+      this._mesh.quaternion.set(
+        sp * cy * cr + cp * sy * sr,
+        cp * sy * cr - sp * cy * sr,
+        cp * cy * sr - sp * sy * cr,
+        cp * cy * cr + sp * sy * sr
+      );
     }
   }
 
@@ -282,14 +328,9 @@ export default class Surface {
    * The geometry will only build the arc needed to create a surface of the
    * proper size.
    */
-  static createCylinderGeometry(
-    width: number,
-    height: number,
-    density: number,
-    radius: number,
-  ) {
-    const delta = 2 * Math.PI * width / density;
-    const halfHeight = radius * Math.PI * height / density;
+  static createCylinderGeometry(width: number, height: number, density: number, radius: number) {
+    const delta = (2 * Math.PI * width) / density;
+    const halfHeight = (radius * Math.PI * height) / density;
     return new THREE.CylinderGeometry(
       radius,
       radius,
@@ -298,7 +339,7 @@ export default class Surface {
       6,
       true,
       -delta * 0.5,
-      delta,
+      delta
     );
   }
 
@@ -306,14 +347,9 @@ export default class Surface {
    * Build a planar geometry for a given size, density, and distance from the
    * user.
    */
-  static createFlatGeometry(
-    width: number,
-    height: number,
-    density: number,
-    radius: number,
-  ) {
-    const halfWidth = radius * Math.PI * width / density;
-    const halfHeight = radius * Math.PI * height / density;
+  static createFlatGeometry(width: number, height: number, density: number, radius: number) {
+    const halfWidth = (radius * Math.PI * width) / density;
+    const halfHeight = (radius * Math.PI * height) / density;
     return new THREE.PlaneGeometry(halfWidth * 2, halfHeight * 2, 1, 1);
   }
 

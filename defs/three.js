@@ -32,6 +32,7 @@ declare module 'three' {
 
   declare class BufferAttribute {
     array: $TypedArray;
+    data: any;
     needsUpdate: boolean;
 
     constructor(): BufferAttribute;
@@ -39,6 +40,7 @@ declare module 'three' {
   }
 
   declare class BufferGeometry extends Geometry {
+    attributes: {[name: string]: BufferAttribute};
     drawRange: {start: number, count: number};
     index: BufferAttribute;
     needsUpdate: boolean;
@@ -49,6 +51,7 @@ declare module 'three' {
     computeVertexNormals(): void;
     setIndex(attr: BufferAttribute | Array<number>): void;
     setDrawRange(number, number): void;
+    applyMatrix(Matrix4): void;
   }
 
   declare class CylinderGeometry extends Geometry {
@@ -119,6 +122,7 @@ declare module 'three' {
     constructor(number, number, number, ?string): this;
     copy(e: Euler): this;
     set(number, number, number, string): this;
+    setFromQuaternion(Quaternion, string): this;
   }
 
   declare class Face3 {
@@ -144,7 +148,7 @@ declare module 'three' {
   declare class InterleavedBuffer {
     array: $TypedArray;
     needsUpdate: boolean;
-    constructor(Float32Array, number): InterleavedBuffer;
+    constructor($TypedArray, number): InterleavedBuffer;
   }
 
   declare class InterleavedBufferAttribute extends BufferAttribute {
@@ -158,6 +162,7 @@ declare module 'three' {
     map: ?Texture;
     needsUpdate: boolean;
     opacity: number;
+    premultipliedAlpha: boolean;
     renderOrder: number;
     shading: number;
     transparent: boolean;
@@ -174,6 +179,13 @@ declare module 'three' {
     decompose(Vector3, Quaternion, Vector3): this;
     fromArray(Array<number> | $TypedArray): void;
     getInverse(matrix: Matrix4): Matrix4;
+    set(number, number, number, number,
+      number, number, number, number,
+      number, number, number, number,
+      number, number, number, number): this;
+    makeScale(number, number, number): this;
+    makeRotationY(number): this;
+    multiply(Matrix4): this;
   }
 
   declare class Mesh extends Object3D {
@@ -276,6 +288,7 @@ declare module 'three' {
   }
 
   declare class Texture {
+    flipY: boolean;
     generateMipmaps: boolean;
     image: Image | HTMLCanvasElement;
     wrapS: number;
@@ -366,5 +379,13 @@ declare module 'three' {
   declare class AnimationMixer {
     constructor(Scene): this;
     clipAction(clip: any): any;
+  }
+
+  declare class EventDispatcher {
+    constructor(): this;
+    addEventListener(string, Object => void): void;
+    hasEventListener(string, Object => void): bool;
+    removeEventListener(string, Object => void): void;
+    dispatchEvent(Object): void;
   }
 }

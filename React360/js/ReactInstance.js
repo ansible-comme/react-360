@@ -16,6 +16,7 @@ import Location from './Compositor/Location';
 import type Surface from './Compositor/Surface';
 import Overlay, {type OverlayInterface} from './Compositor/Overlay';
 import VRState from './Compositor/VRState';
+import type {VideoPlayerImplementation} from './Compositor/Video/Types';
 import MousePanCameraController from './Controls/CameraControllers/MousePanCameraController';
 import ScrollPanCameraController from './Controls/CameraControllers/ScrollPanCameraController';
 import DeviceOrientationCameraController from './Controls/CameraControllers/DeviceOrientationCameraController';
@@ -37,6 +38,7 @@ import type Module from './Modules/Module';
 import type {CustomView} from './Modules/UIManager';
 import Runtime, {type NativeModuleInitializer} from './Runtime/Runtime';
 import {rotateByQuaternion} from './Utils/Math';
+import EventEmitter from 'eventemitter3';
 
 type Root = {
   initialProps: Object,
@@ -68,7 +70,14 @@ export type React360Options = {
   frame?: number => mixed,
   fullScreen?: boolean,
   nativeModules?: Array<Module | NativeModuleInitializer>,
-  useNewViews?: boolean,
+  customVideoPlayers?: Array<Class<VideoPlayerImplementation>>,
+};
+
+export type React360Event = {
+  type: string, // type of the event
+  timeStamp: number, // time stamp of the event
+  error?: string, // if the event is an error, this will provide error message
+  payload?: Object, // if the event has extra information, will provide in payload
 };
 
 const DEFAULT_SURFACE_DEPTH = 4;
@@ -95,6 +104,7 @@ export default class ReactInstance {
   _nextFrame: null | AnimationFrameData;
   _parent: HTMLElement;
   _rays: Array<Ray>;
+  _surfaceNameOffset: number = 0;
   _videoModule: ?VideoModule;
   controls: Controls;
   compositor: Compositor;
@@ -102,16 +112,13 @@ export default class ReactInstance {
   runtime: Runtime;
   scene: THREE.Scene;
   vrState: VRState;
+  eventEmitter: EventEmitter;
 
   /**
    * Create a new instance of a React 360 app, given a path to the React 360 JS
    * bundle and a DOM component to mount within.
    */
-  constructor(
-    bundle: string,
-    parent: HTMLElement,
-    options: React360Options = {},
-  ) {
+  constructor(bundle: string, parent: HTMLElement, options: React360Options = {}) {
     (this: any).enterVR = this.enterVR.bind(this);
     (this: any).frame = this.frame.bind(this);
     (this: any)._onResize = this._onResize.bind(this);
@@ -153,7 +160,7 @@ export default class ReactInstance {
     this.controls = new Controls();
     this.overlay = options.customOverlay || new Overlay(parent);
 
-    this.compositor = new Compositor(this._eventLayer, this.scene);
+    this.compositor = new Compositor(this._eventLayer, this.scene, options.customVideoPlayers);
     let assetRoot = options.assetRoot || 'static_assets/';
     if (!assetRoot.endsWith('/')) {
       assetRoot += '/';
@@ -171,21 +178,14 @@ export default class ReactInstance {
           return audio;
         },
         ctx => {
-          const video = new VideoModule(
-            this.compositor.getVideoPlayerManager(),
-          );
+          const video = new VideoModule(ctx, this.compositor.getVideoPlayerManager());
           this._videoModule = video;
           return video;
         },
         ...(options.nativeModules || []),
       ],
-      useNewViews: options.useNewViews,
     };
-    this.runtime = new Runtime(
-      this.scene,
-      bundleFromLocation(bundle),
-      runtimeOptions,
-    );
+    this.runtime = new Runtime(this.scene, bundleFromLocation(bundle), runtimeOptions);
 
     this.vrState = new VRState();
     this.vrState.onDisplayChange(display => {
@@ -195,19 +195,12 @@ export default class ReactInstance {
         this.overlay.setVRButtonState(false, 'No Headset', null);
       }
     });
-    this.vrState.onExit(() => {
-      this._needsResize = true;
-    });
+    this.vrState.onExit(this._onExitVR.bind(this));
+    this.eventEmitter = new EventEmitter();
 
-    this.controls.addCameraController(
-      new DeviceOrientationCameraController(this._eventLayer),
-    );
-    this.controls.addCameraController(
-      new MousePanCameraController(this._eventLayer),
-    );
-    this.controls.addCameraController(
-      new ScrollPanCameraController(this._eventLayer),
-    );
+    this.controls.addCameraController(new DeviceOrientationCameraController(this._eventLayer));
+    this.controls.addCameraController(new MousePanCameraController(this._eventLayer));
+    this.controls.addCameraController(new ScrollPanCameraController(this._eventLayer));
     this.controls.addEventChannel(new MouseInputChannel(this._eventLayer));
     this.controls.addEventChannel(new TouchInputChannel(this._eventLayer));
     this.controls.addEventChannel(new KeyboardInputChannel());
@@ -215,6 +208,10 @@ export default class ReactInstance {
     this.controls.addRaycaster(new ControllerRaycaster());
     this.controls.addRaycaster(new MouseRaycaster(this._eventLayer));
     this.controls.addRaycaster(new TouchRaycaster(this._eventLayer));
+  }
+
+  emitEvent(event: React360Event) {
+    this.eventEmitter.emit(event.type, event);
   }
 
   _onResize() {
@@ -294,10 +291,7 @@ export default class ReactInstance {
         this._cameraQuat[3] = orientation[3];
       }
     } else {
-      this.controls.fillCameraProperties(
-        this._cameraPosition,
-        this._cameraQuat,
-      );
+      this.controls.fillCameraProperties(this._cameraPosition, this._cameraQuat);
     }
     if (this._rays.length > 0) {
       for (let i = 0; i < this._rays.length; i++) {
@@ -320,10 +314,7 @@ export default class ReactInstance {
     }
     this.runtime.queueEvents(this._events);
     // Update each view
-    this.runtime.frame(
-      this.compositor.getCamera(),
-      this.compositor.getRenderer(),
-    );
+    this.runtime.frame(this.compositor.getCamera(), this.compositor.getRenderer());
     if (this._audioModule) {
       const audioModule = this._audioModule;
       audioModule._setCameraParameters(this._cameraPosition, this._cameraQuat);
@@ -417,12 +408,26 @@ export default class ReactInstance {
    * of a Surface, returning the unique tag of the React root.
    * If the render loop hasn't started yet, this kicks it off.
    */
-  renderToSurface(root: Root, surface: Surface): number | null {
+  renderToSurface(root: Root, surface: Surface, surfaceName?: string): number | null {
     if (!this._looping) {
       this.start();
     }
+
+    const isDefaultSurface = surface === this.compositor.getDefaultSurface();
+    if (!isDefaultSurface && surfaceName === 'default') {
+      throw new Error('Only default surface can use "default" as surface name.');
+    }
+    const _surfaceName = surfaceName
+      ? surfaceName
+      : isDefaultSurface
+        ? 'default'
+        : `surface_${this._surfaceNameOffset++}`;
+    const tag = this.runtime.createRootView(root.name, root.initialProps, surface, _surfaceName);
     this.compositor.showSurface(surface);
-    return this.runtime.createRootView(root.name, root.initialProps, surface);
+    if (_surfaceName !== 'default') {
+      this.compositor.registerSurface(_surfaceName, surface);
+    }
+    return tag;
   }
 
   /**
@@ -437,18 +442,33 @@ export default class ReactInstance {
   }
 
   /**
+   * Detach a root view from the render root(Surface or Location).
+   * The tag here is the root view tag returned in `renderToSurface`
+   * or `renderToLocation`.
+   * You can also re-use the Surface/Location by calling `renderToSurface`
+   * or `renderToLocation` with another rootview name after the root view
+   * is detached
+   */
+  detachRoot(tag: number) {
+    const rootInfo = this.runtime.getSurfaceInfo(tag);
+    if (rootInfo) {
+      this.compositor.hideSurface(rootInfo.surface);
+      if (rootInfo.name !== 'default') {
+        this.compositor.unregisterSurface(rootInfo.name);
+      }
+    }
+    this.runtime.destroyRootView(tag);
+  }
+
+  /**
    * Switch to 3D rendering to rendering the contents of a specific surface
    * directly to the canvas. This may be useful for debugging or certain
    * out-of-VR use cases.
    */
   focusSurface(name?: string) {
-    const surface = name
-      ? this.compositor.getSurface(name)
-      : this.compositor.getDefaultSurface();
+    const surface = name ? this.compositor.getSurface(name) : this.compositor.getDefaultSurface();
     if (!surface) {
-      throw new Error(
-        `Cannot focus Surface ${name || ''}, it is not registered`,
-      );
+      throw new Error(`Cannot focus Surface ${name || ''}, it is not registered`);
     }
     const canvas = this.compositor.getCanvas();
     this._appearanceStateStack.push({
@@ -511,8 +531,24 @@ export default class ReactInstance {
    *
    */
   enterVR() {
+    this.emitEvent({
+      type: 'entervr',
+      timeStamp: Date.now(),
+      payload: {
+        stage: 'attempt',
+      },
+    });
     const display = this.vrState.getCurrentDisplay();
     if (!display || display.isPresenting) {
+      const error = display ? 'VR Display is already presenting.' : 'No VR Display is connected.';
+      this.emitEvent({
+        type: 'entervr',
+        timeStamp: Date.now(),
+        error: error,
+        payload: {
+          stage: 'failed',
+        },
+      });
       return;
     }
     display
@@ -522,14 +558,36 @@ export default class ReactInstance {
         },
       ])
       .then(() => {
+        this.emitEvent({
+          type: 'entervr',
+          timeStamp: Date.now(),
+          payload: {
+            stage: 'succeed',
+          },
+        });
         const leftParams = display.getEyeParameters('left');
         const rightParams = display.getEyeParameters('right');
         this.compositor.resize(
           leftParams.renderWidth + rightParams.renderWidth,
           Math.min(leftParams.renderHeight, rightParams.renderHeight),
-          1,
+          1
         );
+      })
+      .catch(() => {
+        this.emitEvent({
+          type: 'entervr',
+          timeStamp: Date.now(),
+          error: 'Failed request presenting in VR Display',
+          payload: {
+            stage: 'failed',
+          },
+        });
       });
+  }
+
+  _onExitVR() {
+    this.emitEvent({type: 'exitvr', timeStamp: Date.now()});
+    this._needsResize = true;
   }
 
   resize(width: number, height: number) {

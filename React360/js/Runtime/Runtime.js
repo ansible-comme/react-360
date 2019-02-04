@@ -22,8 +22,16 @@ import GuiSys from '../OVRUI/UIView/GuiSys';
 import {ReactNativeContext} from '../ReactNativeContext';
 
 type LocationNode = {
+  tag: number,
   location: Location,
   node: THREE.Object3D,
+};
+
+type SurfaceNode = {
+  tag: number,
+  offscreenRenderUID: number,
+  surface: Surface,
+  name: string,
 };
 
 export type NativeModuleInitializer = ReactNativeContext => Module;
@@ -33,16 +41,11 @@ export type RuntimeOptions = {
   customViews?: Array<CustomView>,
   executor?: ReactExecutor,
   nativeModules?: Array<Module | NativeModuleInitializer>,
-  useNewViews?: boolean,
 };
 
 const raycaster = new THREE.Raycaster();
-function intersectObject(
-  object: Object,
-  ray: THREE.Raycaster,
-  intersects: Array<Object>,
-) {
-  if (object.visible === false) {
+function intersectObject(object: Object, ray: THREE.Raycaster, intersects: Array<Object>) {
+  if (object.visible === false || object.raycastDisabled === true) {
     return;
   }
   object.raycast(ray, intersects);
@@ -55,7 +58,6 @@ const surfaceHits = [];
 
 const DEVTOOLS_FLAG = /\bdevtools\b/;
 const HOTRELOAD_FLAG = /\bhotreload\b/;
-const SURFACE_DEPTH = 4; // 4 meters
 
 /**
  * Runtime wraps the majority of React VR logic. It sends event data to the
@@ -65,18 +67,22 @@ const SURFACE_DEPTH = 4; // 4 meters
 export default class Runtime {
   _cursorIntersectsSurface: boolean;
   _initialized: boolean;
-  _rootLocations: Array<LocationNode>;
+  _lastHit: ?number;
+  _offscreenRenderUID: number;
+  _rootLocations: {[tag: string]: LocationNode};
+  _rootSurfaces: {[tag: string]: SurfaceNode};
+  _scene: THREE.Scene;
   context: ReactNativeContext;
   executor: ReactExecutor;
   guiSys: GuiSys;
 
-  constructor(
-    scene: THREE.Scene,
-    bundle: string,
-    options: RuntimeOptions = {},
-  ) {
-    this._rootLocations = [];
+  constructor(scene: THREE.Scene, bundle: string, options: RuntimeOptions = {}) {
+    this._rootLocations = {};
+    this._rootSurfaces = {};
+    this._scene = scene;
     this._cursorIntersectsSurface = false;
+    this._lastHit = null;
+    this._offscreenRenderUID = 0;
     let enableDevTools = false;
     let bundleURL = bundle;
     let enableHotReload = false;
@@ -88,7 +94,7 @@ export default class Runtime {
           console.log(
             'We detected that you have the React Devtools extension installed. ' +
               'Please note that at this time, React VR is only compatible with the ' +
-              'standalone Inspector (npm run devtools).',
+              'standalone Inspector (npm run devtools).'
           );
           /* eslint-enable no-console */
         }
@@ -107,12 +113,12 @@ export default class Runtime {
       new ReactExecutorWebWorker({
         enableDevTools,
       });
+
     this.guiSys = new GuiSys(scene, {});
     this.context = new ReactNativeContext(this.guiSys, this.executor, {
       assetRoot: options.assetRoot,
       customViews: options.customViews || [],
       enableHotReload,
-      useNewViews: options.useNewViews,
     });
     const modules = options.nativeModules;
     if (modules) {
@@ -120,7 +126,7 @@ export default class Runtime {
         const m = modules[i];
         if (typeof m === 'function') {
           // module initializer
-          this.context.registerModule(m(this.context));
+          this.context.registerModule(m((this.context: any)));
         } else {
           this.context.registerModule(m);
         }
@@ -129,100 +135,148 @@ export default class Runtime {
     this.context.init(bundleURL);
   }
 
-  createRootView(name: string, initialProps: Object, dest: Location | Surface) {
+  createRootView(
+    name: string,
+    initialProps: Object,
+    dest: Location | Surface,
+    surfaceName?: string
+  ) {
     if (dest instanceof Surface) {
-      this.guiSys.registerOffscreenRender(
+      const context = this.context;
+      const offscreenRenderUID = this.guiSys.registerOffscreenRender(
         dest.getScene(),
         dest.getCamera(),
-        dest.getRenderTarget(),
+        dest.getRenderTarget()
       );
-      const tag = this.context.createRootView(
-        name,
-        initialProps,
-        dest.getScene(),
-        true,
-      );
+      const tag = context.createRootView(name, initialProps, dest.getScene(), true);
+      const rootView = context.getViewForTag(tag);
+      if (rootView) {
+        rootView.surfaceName = surfaceName;
+      }
+      this._rootSurfaces[String(tag)] = {
+        tag: tag,
+        offscreenRenderUID: offscreenRenderUID,
+        surface: dest,
+        name: surfaceName || '',
+      };
       return tag;
     } else if (dest instanceof Location) {
       const node = new THREE.Object3D();
       node.position.fromArray(dest.worldPosition);
       node.quaternion.fromArray(dest.worldRotation);
       this.guiSys.root.add(node);
-      this._rootLocations.push({
+      const tag = this.context.createRootView(name, initialProps, (node: any));
+      this._rootLocations[String(tag)] = {
+        tag: tag,
         location: dest,
         node: node,
-      });
-      const tag = this.context.createRootView(name, initialProps, (node: any));
+      };
       return tag;
     }
     throw new Error('Invalid mount point');
   }
 
-  frame(camera: THREE.Camera, renderer: THREE.WebGLRenderer) {
-    this.guiSys.frameRenderUpdates(camera);
-    this.context.frame(camera);
+  getSurfaceInfo(tag: number): ?SurfaceNode {
+    const key = String(tag);
+    if (this._rootSurfaces[key]) {
+      return this._rootSurfaces[key];
+    }
+    return null;
+  }
 
-    const offscreen = this.guiSys.getOffscreenRenders();
+  destroyRootView(tag: number) {
+    const key = String(tag);
+    if (this._rootSurfaces[key]) {
+      this.context.destroyRootView(tag);
+      this.guiSys.unregisterOffscreenRender(this._rootSurfaces[key].offscreenRenderUID);
+      delete this._rootSurfaces[key];
+      return;
+    }
+    if (this._rootLocations[key]) {
+      this.context.destroyRootView(tag);
+      delete this._rootLocations[key];
+      return;
+    }
+  }
+
+  frame(camera: THREE.Camera, renderer: THREE.WebGLRenderer) {
+    const context = this.context;
+    let offscreen = {};
+    this.guiSys.frameRenderUpdates(camera);
+    offscreen = this.guiSys.getOffscreenRenders();
+    context.frame(camera);
+
     for (const item in offscreen) {
-      if (!offscreen.hasOwnProperty(item)) {
+      const params = offscreen[item];
+      if (!params) {
         continue;
       }
-      const params = offscreen[item];
       const oldClearColor = renderer.getClearColor();
       const oldClearAlpha = renderer.getClearAlpha();
-      const oldSort = renderer.sortObjects;
       const oldClipping = renderer.localClippingEnabled;
       renderer.localClippingEnabled = true;
       renderer.setClearColor('#000', 0);
-      renderer.sortObjects = false;
       renderer.render(params.scene, params.camera, params.renderTarget, true);
-      renderer.sortObjects = oldSort;
       renderer.setClearColor(oldClearColor, oldClearAlpha);
       renderer.setRenderTarget(null);
       renderer.localClippingEnabled = oldClipping;
     }
-    for (let i = 0; i < this._rootLocations.length; i++) {
-      const {location, node} = this._rootLocations[i];
+    for (const key in this._rootLocations) {
+      const {location, node} = this._rootLocations[key];
       if (location.isDirty()) {
         const worldPosition = location.worldPosition;
         node.position.set(worldPosition[0], worldPosition[1], worldPosition[2]);
         const worldRotation = location.worldRotation;
-        node.quaternion.set(
-          worldRotation[0],
-          worldRotation[1],
-          worldRotation[2],
-          worldRotation[3],
-        );
+        node.quaternion.set(worldRotation[0], worldRotation[1], worldRotation[2], worldRotation[3]);
         location.clearDirtyFlag();
       }
     }
   }
 
   queueEvents(events: Array<InputEvent>) {
-    for (let i = 0; i < events.length; i++) {
-      this.guiSys.eventDispatcher.dispatchEvent({
-        type: 'InputChannelEvent',
-        args: events[i],
-      });
+    if (this.guiSys) {
+      for (let i = 0; i < events.length; i++) {
+        this.guiSys.eventDispatcher.dispatchEvent({
+          type: 'InputChannelEvent',
+          args: events[i],
+        });
+      }
+    } else if (this._lastHit != null) {
+      for (let i = 0; i < events.length; i++) {
+        this.context.callFunction('RCTEventEmitter', 'receiveEvent', [
+          this._lastHit,
+          'topInput',
+          {
+            inputEvent: events[i],
+            target: this._lastHit,
+            source: this._lastHit,
+          },
+        ]);
+      }
     }
   }
 
   setRays(rays: Array<Ray>, cameraPosition: Vec3, cameraQuat: Quaternion) {
     if (rays.length < 1) {
-      this.guiSys.updateLastHit(null, '');
+      if (this.guiSys) {
+        this.guiSys.updateLastHit(null, '');
+      }
+      this._lastHit = null;
       return;
     }
     // TODO: Support multiple raycasters
     const ray = rays[0];
+    const root = this.guiSys ? this.guiSys.root : this._scene;
 
     // This will get replaced with the trig-based raycaster for surfaces
     let firstHit = null;
     raycaster.ray.origin.fromArray(ray.origin);
     raycaster.ray.direction.fromArray(ray.direction);
-    const hits = raycaster.intersectObject(this.guiSys.root, true);
+    const hits = raycaster.intersectObject(root, true);
     let hitSurface = false;
     for (let i = 0; i < hits.length; i++) {
       let hit = hits[i];
+      let notHit = false;
       if (hit.uv && hit.object && hit.object.subScene) {
         hitSurface = true;
         const distanceToSubscene = hit.distance;
@@ -233,9 +287,11 @@ export default class Runtime {
         if (surfaceHit) {
           hit = surfaceHit;
           hit.distance = distanceToSubscene;
+        } else {
+          notHit = true;
         }
       }
-      if (!firstHit && !hit.isAlmostHit) {
+      if (!notHit && !firstHit && !hit.isAlmostHit) {
         firstHit = hit;
       }
     }
@@ -250,22 +306,32 @@ export default class Runtime {
     if (surfaceHits.length === 0) {
       return null;
     }
-    return surfaceHits[surfaceHits.length - 1];
+    for (let i = surfaceHits.length - 1; i >= 0; i--) {
+      const hit = surfaceHits[i];
+      if (hit.object && typeof hit.object.shouldAcceptHitEvent === 'function') {
+        if (!hit.object.shouldAcceptHitEvent()) {
+          continue;
+        }
+      }
+      return hit;
+    }
   }
 
   setIntersection(hit: ?Object, ray: Ray, onSurface?: boolean) {
     this._cursorIntersectsSurface = !!onSurface;
+    if (!this.guiSys) {
+      return;
+    }
     if (hit) {
       this.guiSys.updateLastHit(hit.object, ray.type);
+      if (hit.object.shouldAcceptHitEvent && hit.object.shouldAcceptHitEvent()) {
+        this.guiSys.setLastLocalIntersect(hit.uv.x, hit.uv.y);
+      }
       this.guiSys._cursor.intersectDistance = hit.distance;
     } else {
       this.guiSys.updateLastHit(null, ray.type);
     }
-    this.guiSys.setCursorProperties(
-      ray.origin.slice(),
-      ray.direction.slice(),
-      ray.drawsCursor,
-    );
+    this.guiSys.setCursorProperties(ray.origin.slice(), ray.direction.slice(), ray.drawsCursor);
   }
 
   set2DRays(rays: Array<Ray>, surface: Surface) {
@@ -274,15 +340,14 @@ export default class Runtime {
       return;
     }
     const ray = rays[0];
-    const hit = this.surfaceRaycast(
-      surface.getScene(),
-      ray.origin[0],
-      ray.origin[1],
-    );
+    const hit = this.surfaceRaycast(surface.getScene(), ray.origin[0], ray.origin[1]);
     this.setIntersection(hit, ray, true);
   }
 
   isMouseCursorActive(): boolean {
+    if (!this.guiSys) {
+      return false;
+    }
     return this.guiSys.mouseCursorActive;
   }
 
@@ -290,7 +355,9 @@ export default class Runtime {
     if (this._cursorIntersectsSurface) {
       return true;
     }
-
+    if (!this.guiSys) {
+      return false;
+    }
     const lastHit = this.guiSys._cursor.lastHit;
     const lastAlmostHit = this.guiSys._cursor.lastAlmostHit;
     let active = lastHit && lastHit.isInteractable;
@@ -301,10 +368,6 @@ export default class Runtime {
   }
 
   getCursorDepth(): number {
-    // Will derive from React components
-    if (this._cursorIntersectsSurface) {
-      return SURFACE_DEPTH;
-    }
     return this.guiSys._cursor.intersectDistance;
   }
 }

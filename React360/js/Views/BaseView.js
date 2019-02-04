@@ -18,7 +18,7 @@
 /* eslint-disable */
 
 import isPositive from '../Utils/isPositive';
-import * as Flexbox from '../Utils/FlexboxImplementation';
+import * as Flexbox from '../Renderer/FlexboxImplementation';
 import UIManager from '../Modules/UIManager';
 
 import type UIView from '../OVRUI/UIView/UIView';
@@ -116,6 +116,7 @@ export default class RCTBaseView {
   style: any;
   tag: number;
   rootTag: number;
+  surfaceName: ?string;
   interactableCount: number;
   inSurfaceContext: boolean;
   mouseInteractableCount: number;
@@ -143,6 +144,7 @@ export default class RCTBaseView {
     this.UIManager = null;
     this.tag = 0;
     this.rootTag = 0;
+    this.surfaceName = null;
     this.children = [];
     this.parent = null;
     this.props = {};
@@ -927,6 +929,10 @@ export default class RCTBaseView {
         RCTBaseView.disposeThreeJSObject(node.children[i]);
       }
     }
+    if (node.parent && node.parent.type !== 'UIView') {
+      // manually detached from non UIView parent
+      node.parent.remove(node);
+    }
     node.parent = null;
     node.children = [];
   }
@@ -950,6 +956,40 @@ export default class RCTBaseView {
       },
       Commands: {
         setImmediateOnTouchEnd: COMMAND_SET_IMMEDIATE_ON_TOUCH_END,
+      },
+      bubblingEventTypes: {
+        topChange: {
+          phasedRegistrationNames: {
+            bubbled: 'onChange',
+            captured: 'onChangeCapture',
+          },
+        },
+        topInput: {
+          phasedRegistrationNames: {
+            bubbled: 'onInput',
+            captured: 'onInputCapture',
+          },
+        },
+        topHeadPose: {
+          phasedRegistrationNames: {
+            bubbled: 'onHeadPose',
+            captured: 'onHeadPoseCapture',
+          },
+        },
+      },
+      directEventTypes: {
+        topLayout: {registrationName: 'onLayout'},
+        topLoadStart: {registrationName: 'onLoadStart'},
+        topLoad: {registrationName: 'onLoad'},
+        topLoadEnd: {registrationName: 'onLoadEnd'},
+        topEnter: {registrationName: 'onEnter'},
+        topExit: {registrationName: 'onExit'},
+        topMove: {registrationName: 'onMove'},
+        // Media Events
+        topDurationChange: {registrationName: 'onDurationChange'},
+        topEnded: {registrationName: 'onEnded'},
+        topTimeUpdate: {registrationName: 'onTimeUpdate'},
+        topPlayStatusChange: {registrationName: 'onPlayStatusChange'},
       },
     };
   }
